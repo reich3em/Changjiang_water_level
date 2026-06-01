@@ -2,19 +2,23 @@ name: scrape-and-update
 
 on:
   schedule:
-    - cron: '0 6 * * *' # 每天固定时间自动运行（可根据需要修改时间）
+    - cron: '0 6 * * *' # 每天固定时间自动运行
   workflow_dispatch: # 允许您在 GitHub 页面上手动点击运行
+
+# 核心修复：显式赋予机器人对仓库的“写权限”，解决 403 报错
+permissions:
+  contents: write
 
 jobs:
   scrape-and-update:
     runs-on: ubuntu-24.04
 
     steps:
-      # 1. 检出代码仓库（已升级至 v4，解决 Node.js 警告）
+      # 1. 检出代码仓库
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 设置 Python 环境（已升级至 v5并指定 3.10 版本，解决 Node.js 警告）
+      # 2. 设置 Python 环境（指定 3.10 版本）
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
