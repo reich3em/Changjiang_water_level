@@ -1,141 +1,165 @@
 import os
 import re
 import time
-import requests
+from io import StringIO
+from urllib.parse import urljoin
+
 import pandas as pd
+import requests
 from bs4 import BeautifulSoup
 
-# ==================== 1. 全局配置 ====================
-BASE_URL = "http://www.cjw.gov.cn/zwzc/bmfw/swsq/"  
+
+INDEX_URL = "https://www.mot.gov.cn/fuwu/yujingtishi/cjshuiweichaowei/index.html"
+CSV_PATH = "yangtze_water_levels.csv"
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Referer": "https://www.mot.gov.cn/",
 }
 
-# ==================== 2. 辅助工具函数 ====================
 
-def get_page_url(page):
-    if page == 1:
-        return BASE_URL
-    else:
-        return f"{BASE_URL}index_{page}.html"
+def normalize_text(value):
+    return re.sub(r"\s+", " ", str(value)).strip()
 
-def parse_datetime_from_title(title):
-    match = re.search(r'(\d{4}[-\u4e00-\u9fa5]\d{1,2}[-\u4e00-\u9fa5]\d{1,2})', title)
-    if match:
-        return match.group(1)
-    return None
 
-# ==================== 3. 核心爬取主函数 ====================
+def fetch_html(session, url):
+    response = session.get(url, headers=HEADERS, timeout=30)
+    response.raise_for_status()
+    response.encoding = "utf-8"
+    return response.text
 
-def scrape_data():
-    all_records = []
-    
-    # 为了排查问题，我们先尝试抓取前 3 页即可（避免盲目请求过多）
-    total_pages = 3  
-    
-    print(f"=== 开始执行抓取流程，目标总页数: {total_pages} ===")
-    
-    for page in range(1, total_pages + 1):
-        url = get_page_url(page)
-        print(f"\n[Page {page}] 正在请求目录页: {url}")
-        
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=30)
-            response.encoding = 'utf-8'
-            
-            # 🔴 关键排错日志：打印服务器返回的状态码和内容长度
-            print(f"[Page {page}] 服务器响应状态码: {response.status_code}, 内容长度: {len(response.text)} 字节")
-            
-            if response.status_code != 200:
-                print(f"[Page {page}] ❌ 请求失败！状态码异常，可能被网站防火墙拦截。")
-                continue
-                
-            # 如果怀疑被拦截，打印前 300 个字符看看到底返回了什么（比如是不是报错页面）
-            if "⚡" in response.text or "安全" in response.text or "Forbidden" in response.text or len(response.text) < 1000:
-                print(f"[Page {page}] ⚠️ 警告：返回的内容似乎包含拦截提示或页面过短。开头内容预览:\n{response.text[:300]}")
 
-            soup = BeautifulSoup(response.text, 'html.parser')
-            links = soup.find_all('a', href=True)
-            
-            print(f"[Page {page}] 当前页面解析到总链接数: {len(links)}")
-            
-            target_links_count = 0
-            for a in links:
-                title = a.text.strip()
-                # 如果你想看看网页里都有什么标题，可以取消下面这行的注释：
-                # print(f"  发现链接文本: {title}")
-                
-                if '长江水位' in title:
-                    target_links_count += 1
-                    dt_str = parse_datetime_from_title(title)
-                    if not dt_str:
-                        continue
-                        
-                    href = a['href'].replace('./', '')
-                    detail_url = href if href.startswith('http') else BASE_URL + href
-                    print(f"  -> 🎉 找到目标数据: {title} ({dt_str}) -> 详情页: {detail_url}")
-                    
-                    try:
-                        detail_res = requests.get(detail_url, headers=HEADERS, timeout=30)
-                        detail_res.encoding = 'utf-8'
-                        
-                        tables = pd.read_html(detail_res.text)
-                        if tables:
-                            df = tables[0] 
-                            df.columns = df.iloc[0] 
-                            df = df[1:].copy()      
-                            df['观测时间'] = dt_str
-                            all_records.append(df)
-                            print(f"     ✅ 成功解析表格数据，包含 {len(df)} 条记录")
-                            
-                        time.sleep(3) 
-                        
-                    except Exception as inner_e:
-                        print(f"     ❌ 抓取详情页出错: {inner_e}")
-                        continue 
-            
-            print(f"[Page {page}] 页面处理完毕，其中包含'长江水位'的链接数: {target_links_count}")
-            
-        except Exception as e:
-            print(f"[Page {page}] ❌ 打开目录页时发生严重错误: {e}")
+def parse_observed_time(title):
+    match = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日(?:(\d{1,2})时)?长江水位", title)
+    if not match:
+        return None
+
+    year, month, day, hour = match.groups()
+    hour = hour or "8"
+    return f"{int(year):04d}-{int(month):02d}-{int(day):02d} {int(hour):02d}:00:00"
+
+
+def find_water_level_links(index_html):
+    soup = BeautifulSoup(index_html, "lxml")
+    links = []
+    seen = set()
+
+    for anchor in soup.select("a[href]"):
+        title = normalize_text(anchor.get_text())
+        href = anchor.get("href", "")
+        if "长江水位" not in title or "长江潮位" in title:
             continue
 
-    # ==================== 4. 历史数据合并与保存 ====================
-    print("\n=== 开始进行数据保存阶段 ===")
-    if all_records:
-        new_df = pd.concat(all_records, ignore_index=True)
-        cols = new_df.columns.tolist()
-        if '观测时间' in cols:
-            cols = ['观测时间'] + [c for c in cols if c != '观测时间']
-            new_df = new_df[cols]
-            
-        file_path = "yangtze_water_levels.csv"
-        
-        if os.path.exists(file_path):
-            try:
-                print("发现历史 CSV 文件，正在读取并进行增量合并...")
-                old_df = pd.read_csv(file_path)
-                final_df = pd.concat([old_df, new_df], ignore_index=True)
-                
-                if '测站' in final_df.columns:
-                    final_df.drop_duplicates(subset=['观测时间', '测站'], keep='first', inplace=True)
-                elif '站名' in final_df.columns:
-                    final_df.drop_duplicates(subset=['观测时间', '站名'], keep='first', inplace=True)
-                else:
-                    final_df.drop_duplicates(inplace=True)
-            except Exception as e:
-                print(f"读取历史数据失败({e})，将直接覆盖。")
-                final_df = new_df
-        else:
-            print("未发现历史数据文件，将创建新文件...")
-            final_df = new_df
-            
-        final_df.to_csv(file_path, index=False, encoding='utf-8-sig')
-        print(f"🚀 成功保存！当前文件总记录数: {len(final_df)}")
+        observed_time = parse_observed_time(title)
+        if not observed_time:
+            print(f"跳过无法识别时间的标题: {title}")
+            continue
+
+        detail_url = urljoin(INDEX_URL, href)
+        if detail_url in seen:
+            continue
+
+        seen.add(detail_url)
+        links.append(
+            {
+                "title": title,
+                "url": detail_url,
+                "observed_time": observed_time,
+            }
+        )
+
+    return links
+
+
+def parse_detail_table(detail_html, observed_time):
+    tables = pd.read_html(StringIO(detail_html))
+    if not tables:
+        return pd.DataFrame(columns=["观测时间", "站点", "水位", "涨落"])
+
+    table = tables[0].copy()
+    table.columns = [normalize_text(col) for col in table.columns]
+
+    if not any("站点" in col for col in table.columns) and len(table) > 0:
+        table.columns = [normalize_text(col) for col in table.iloc[0].tolist()]
+        table = table.iloc[1:].reset_index(drop=True)
+
+    rename_map = {}
+    for col in table.columns:
+        if "站点" in col:
+            rename_map[col] = "站点"
+        elif "水位" in col:
+            rename_map[col] = "水位"
+        elif "涨落" in col:
+            rename_map[col] = "涨落"
+
+    table = table.rename(columns=rename_map)
+    required_columns = ["站点", "水位", "涨落"]
+    missing = [col for col in required_columns if col not in table.columns]
+    if missing:
+        raise ValueError(f"详情表格缺少字段: {missing}")
+
+    table = table[required_columns].copy()
+    table.insert(0, "观测时间", observed_time)
+
+    for col in table.columns:
+        table[col] = table[col].map(normalize_text)
+
+    table = table[table["站点"].ne("")]
+    return table
+
+
+def merge_and_save(new_df):
+    new_df = new_df[["观测时间", "站点", "水位", "涨落"]].copy()
+
+    if os.path.exists(CSV_PATH):
+        old_df = pd.read_csv(CSV_PATH, dtype=str)
+        final_df = pd.concat([old_df, new_df], ignore_index=True)
     else:
-        print("❌ 最终结论：本次运行未抓取到任何有效数据，CSV 文件未更新。")
+        final_df = new_df
+
+    final_df = final_df[["观测时间", "站点", "水位", "涨落"]]
+    final_df = final_df.drop_duplicates(subset=["观测时间", "站点"], keep="last")
+    final_df = final_df.sort_values(["观测时间", "站点"]).reset_index(drop=True)
+    final_df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
+    return final_df
+
+
+def scrape_data():
+    session = requests.Session()
+    print(f"开始请求入口页: {INDEX_URL}")
+    index_html = fetch_html(session, INDEX_URL)
+    links = find_water_level_links(index_html)
+    print(f"入口页发现长江水位详情链接: {len(links)} 个")
+
+    all_frames = []
+    for item in links:
+        print(f"抓取详情: {item['title']} -> {item['url']}")
+        try:
+            detail_html = fetch_html(session, item["url"])
+            df = parse_detail_table(detail_html, item["observed_time"])
+            if df.empty:
+                print("  未解析到表格数据")
+                continue
+
+            all_frames.append(df)
+            print(f"  成功解析 {len(df)} 条记录")
+            time.sleep(1)
+        except Exception as exc:
+            print(f"  详情页处理失败: {exc}")
+
+    if not all_frames:
+        print("本次未抓取到任何有效数据，CSV 文件未更新。")
+        return
+
+    new_df = pd.concat(all_frames, ignore_index=True)
+    final_df = merge_and_save(new_df)
+    print(f"保存完成: 本次抓取 {len(new_df)} 条，CSV 当前总计 {len(final_df)} 条。")
+
 
 if __name__ == "__main__":
     scrape_data()
