@@ -2,10 +2,9 @@ name: scrape-and-update
 
 on:
   schedule:
-    - cron: '0 6 * * *' # 每天固定时间自动运行
-  workflow_dispatch: # 允许您在 GitHub 页面上手动点击运行
+    - cron: "0 6 * * *"
+  workflow_dispatch:
 
-# 核心修复：显式赋予机器人对仓库的“写权限”，解决 403 报错
 permissions:
   contents: write
 
@@ -14,34 +13,26 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # 1. 检出代码仓库
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 设置 Python 环境（指定 3.10 版本）
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
-      # 3. 安装依赖
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4. 运行爬虫脚本
       - name: Run scraper
-        run: |
-          python scraper.py
+        run: python scraper.py
 
-      # 5. 提交并推送数据更新
-      - name: Commit and Push changes
+      - name: Commit and push changes
         run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add yangtze_water_levels.csv
-          
-          # 如果数据有改动则 commit 并 push，没有改动则直接跳过，不会报错
           git diff --quiet && git diff --staged --quiet || git commit -m "Auto-update: 长江水位数据更新"
           git push
